@@ -18,6 +18,7 @@ package loadbalancer_test
 
 import (
 	gocontext "context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -26,6 +27,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infrav1 "sigs.k8s.io/cluster-api-provider-kubevirt/api/v1alpha1"
 	"sigs.k8s.io/cluster-api-provider-kubevirt/pkg/context"
@@ -111,6 +113,54 @@ var _ = Describe("Load Balancer", func() {
 			err = lb.Create(clusterContext)
 			Expect(err).To(HaveOccurred())
 		})
+	})
+})
+
+var _ = Describe("Load Balancer Create", func() {
+	It("should return the error from creating the service", func() {
+		failingClient := fake.NewClientBuilder().
+			WithScheme(testing.SetupScheme()).
+			WithObjects(cluster, kubevirtCluster).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(_ gocontext.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+					return errors.New("injected create failure")
+				},
+			}).
+			Build()
+
+		lb, err := loadbalancer.NewLoadBalancer(clusterContext, failingClient, "")
+		Expect(err).NotTo(HaveOccurred())
+
+		err = lb.Create(clusterContext)
+		Expect(err).To(MatchError(ContainSubstring("injected create failure")))
+	})
+
+	It("should not modify the KubevirtCluster control plane service template", func() {
+		kc := kubevirtCluster.DeepCopy()
+		kc.Spec.ControlPlaneServiceTemplate.ObjectMeta.Labels = map[string]string{"team": "a"}
+		kc.Spec.ControlPlaneServiceTemplate.ObjectMeta.Annotations = map[string]string{"note": "b"}
+		ctx := &context.ClusterContext{
+			Logger:          clusterContext.Logger,
+			Context:         clusterContext.Context,
+			Cluster:         cluster,
+			KubevirtCluster: kc,
+		}
+		fakeClient := fake.NewClientBuilder().WithScheme(testing.SetupScheme()).WithObjects(cluster, kc).Build()
+
+		lb, err := loadbalancer.NewLoadBalancer(ctx, fakeClient, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lb.Create(ctx)).To(Succeed())
+
+		// The service gets the template labels plus the cluster name label...
+		svc := &corev1.Service{}
+		Expect(fakeClient.Get(gocontext.TODO(), client.ObjectKey{Name: clusterName + "-lb"}, svc)).To(Succeed())
+		Expect(svc.Labels).To(HaveKeyWithValue("team", "a"))
+		Expect(svc.Labels).To(HaveKeyWithValue("cluster.x-k8s.io/cluster-name", clusterName))
+		Expect(svc.Annotations).To(HaveKeyWithValue("note", "b"))
+
+		// ...but the KubevirtCluster spec, which is patched after the reconcile, is unchanged.
+		Expect(kc.Spec.ControlPlaneServiceTemplate.ObjectMeta.Labels).To(Equal(map[string]string{"team": "a"}))
+		Expect(kc.Spec.ControlPlaneServiceTemplate.ObjectMeta.Annotations).To(Equal(map[string]string{"note": "b"}))
 	})
 })
 

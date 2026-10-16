@@ -18,6 +18,7 @@ package loadbalancer
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -102,8 +103,10 @@ func (l *LoadBalancer) Create(ctx *context.ClusterContext) error {
 		},
 	}
 
-	lbService.Labels = ctx.KubevirtCluster.Spec.ControlPlaneServiceTemplate.ObjectMeta.Labels
-	lbService.Annotations = ctx.KubevirtCluster.Spec.ControlPlaneServiceTemplate.ObjectMeta.Annotations
+	// Copy the maps: mutateFn adds a label, which must not end up in the
+	// KubevirtCluster spec (it is patched at the end of the reconcile).
+	lbService.Labels = maps.Clone(ctx.KubevirtCluster.Spec.ControlPlaneServiceTemplate.ObjectMeta.Labels)
+	lbService.Annotations = maps.Clone(ctx.KubevirtCluster.Spec.ControlPlaneServiceTemplate.ObjectMeta.Annotations)
 	lbService.Spec.Type = ctx.KubevirtCluster.Spec.ControlPlaneServiceTemplate.Spec.Type
 
 	mutateFn := func() (err error) {
@@ -115,7 +118,7 @@ func (l *LoadBalancer) Create(ctx *context.ClusterContext) error {
 		return nil
 	}
 	if _, err := ctrlutil.CreateOrUpdate(ctx.Context, l.infraClient, lbService, mutateFn); err != nil {
-		return corev1.ErrIntOverflowGenerated
+		return errors.Wrapf(err, "failed to create load balancer service %s/%s", l.infraNamespace, l.name)
 	}
 
 	return nil
